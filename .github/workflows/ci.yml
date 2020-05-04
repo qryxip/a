@@ -1,0 +1,106 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - master
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+**'
+  pull_request:
+
+env:
+  BIN_TARGET: a
+
+jobs:
+  upload:
+    strategy:
+      fail-fast: false
+      matrix:
+        target-triple:
+          - x86_64-pc-windows-msvc
+          - x86_64-apple-darwin
+          - x86_64-unknown-linux-gnu
+          - x86_64-unknown-linux-musl
+        include:
+          - { target-triple: x86_64-pc-windows-msvc   , host-triple: x86_64-pc-windows-msvc  , os: windows-latest }
+          - { target-triple: x86_64-apple-darwin      , host-triple: x86_64-apple-darwin     , os: macos-latest   }
+          - { target-triple: x86_64-unknown-linux-gnu , host-triple: x86_64-unknown-linux-gnu, os: ubuntu-18.04   }
+          - { target-triple: x86_64-unknown-linux-musl, host-triple: x86_64-unknown-linux-gnu, os: ubuntu-18.04   }
+
+    name: Upload (`${{ matrix.target-triple }}`)
+    runs-on: ${{ matrix.os }}
+    if: startsWith(github.ref, 'refs/tags/')
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v2
+
+      - name: '`sudo apt-get install musl-tools`'
+        run: sudo apt-get install musl-tools
+        if: matrix.target-triple == 'x86_64-unknown-linux-musl'
+
+      - name: 'Setup `stable-${{ matrix.host-triple }}` (target: `${{ matrix.target-triple }}`)'
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable-${{ matrix.host-triple }}
+          target: ${{ matrix.target-triple }}
+          default: true
+          profile: minimal
+
+      - name: '`cargo install --path . --target ${{ matrix.target-triple }} -v --locked`'
+        uses: actions-rs/cargo@v1
+        with:
+          command: install
+          args: --path . --target ${{ matrix.target-triple }} -v --locked
+
+      - name: '`cargo build --release --target ${{ matrix.target-triple }}`'
+        uses: actions-rs/cargo@v1
+        with:
+          command: build
+          args: --release --target ${{ matrix.target-triple }}
+
+      - name: Create an asset
+        id: asset
+        run: |
+          if ${{ contains(matrix.target-triple, 'pc-windows') }}; then
+            DOT_EXE=.exe
+          fi
+          ASSET_STEM="$BIN_TARGET-${GITHUB_REF#refs/tags/}-${{ matrix.target-triple }}"
+          git archive -o "./$ASSET_STEM.tar" --prefix "$ASSET_STEM/" HEAD
+          tar -xf "./$ASSET_STEM.tar"
+          mv "$HOME/.cargo/bin/$BIN_TARGET$DOT_EXE" "./$ASSET_STEM/"
+          if ${{ contains(matrix.target-triple, 'pc-windows') }}; then
+            ASSET="$ASSET_STEM.zip"
+            7z a "$ASSET" "./$ASSET_STEM"
+            zipinfo "./$ASSET"
+          else
+            ASSET="$ASSET_STEM.tar.gz"
+            tar -czvf "./$ASSET" "./$ASSET_STEM"
+          fi
+          echo "::set-output name=asset::$ASSET"
+        shell: bash
+
+      - name: Upload the artifact
+        uses: actions/upload-artifact@v2
+        with:
+          name: assets
+          path: ${{ steps.asset.outputs.asset }}
+
+  release:
+    name: GitHub Release
+    runs-on: ubuntu-18.04
+    needs: [upload]
+
+    steps:
+      - name: Download the assets
+        uses: actions/download-artifact@v2
+        with:
+          name: assets
+          path: ./assets
+
+      - name: GH Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: ./assets/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
